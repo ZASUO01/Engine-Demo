@@ -1,8 +1,9 @@
 // Flappy Bird feito com a Engine: todo o jogo cabe neste arquivo.
 // Fisica (gravidade, triggers), camera, render, texto e loop vem da Engine.
-#include <SDL2/SDL_scancode.h>
+#include <SDL2/SDL.h>
 #include <functional>
 #include <string>
+#include <vector>
 #include "Engine/Engine.h"
 #include "Engine/Assets/AssetsManager.h"
 #include "Engine/Contexts/Contexts.h"
@@ -15,10 +16,9 @@
 #include "Engine/Core/Components/Physics/BoxColliderComponent.h"
 #include "Engine/Core/Components/Physics/RigidBodyComponent.h"
 #include "Engine/Core/Components/Physics/SphereColliderComponent.h"
-#include "Engine/Data/LoadingRecipe.h"
-#include "Engine/Data/ResourcesLoader.h"
 #include "Engine/Graphics/Model.h"
 #include "Engine/Graphics/Renderer/Renderer.h"
+#include "Engine/Graphics/Resources/Texture.h"
 #include "Engine/Math/Random.h"
 #include "Engine/UI/UIElementsManager.h"
 #include "Engine/UI/Elements/UIText.h"
@@ -27,14 +27,13 @@ constexpr float kWorldTop = 4.5f, kGap = 2.8f, kSpeed = 3.5f, kSpawnEvery = 1.7f
 
 struct World { bool running{false}; int round{0}; };
 
-// Carrega as texturas do jogo em background (a Engine cuida do resto).
-class FlappyRecipe : public LoadingRecipe {
-    void OnLoad(ConfigManager&) override {
-        for (auto name : {"Bird", "Pipe", "Ground"}) LoadTextureSurface(std::string("Flappy/Assets/") + name);
-    }
-    void OnBuild(ResourcesContext&) override {}
-    void OnCleanup(ResourcesContext&) override {}
-};
+// Textura de cor solida criada em memoria: o jogo nao depende de nenhum arquivo de imagem.
+Texture* SolidColor(AssetsManager& assets, const std::string& name, Uint8 r, Uint8 g, Uint8 b) {
+    const UniqueSurface surface(SDL_CreateRGBSurfaceWithFormat(0, 4, 4, 32, SDL_PIXELFORMAT_RGBA32));
+    SDL_FillRect(surface.get(), nullptr, SDL_MapRGBA(surface->format, r, g, b, 255));
+    auto* texture = assets.AddTexture(name);
+    return texture->BuildFromSurface(surface) ? texture : nullptr;
+}
 
 class SideCamera : public Camera {
 public:
@@ -53,7 +52,17 @@ public:
         AddComponent(std::move(mesh));
         SetPosition(pos); SetScale(halfSize);
     }
-    using Actor::AddComponent;
+};
+
+// Ator invisivel so com um trigger de caixa (sem escala, para o broad phase da Engine medir certo).
+class HitBox : public Actor {
+public:
+    HitBox(PhysicsSystem* physics, const Vector3& pos, const Vector3& halfSize, const std::function<void()>& onHit) {
+        auto box = std::make_unique<BoxColliderComponent>(this, physics, halfSize, true);
+        box->SetCollisionCallBack(onHit);
+        AddComponent(std::move(box));
+        SetPosition(pos);
+    }
 };
 
 class Bird : public Block {
@@ -75,7 +84,7 @@ private:
     RigidBodyComponent* mBody;
 };
 
-// Par de canos: o proprio ator e o trigger de ponto (o vao); os filhos sao triggers de colisao.
+// Par de canos: o proprio ator e o trigger de ponto (o vao); os filhos sao os canos e suas hitboxes.
 class Pipes : public Actor {
 public:
     Pipes(Model* model, PhysicsSystem* physics, ActorsManager& actors, const World& world,
@@ -88,12 +97,9 @@ public:
         AddComponent(std::move(gate));
 
         for (float side : {1.0f, -1.0f}) {
-            auto pipe = std::make_unique<Block>(model, Vector3{0.0f, side * (kGap / 2 + 5.0f), 0.0f}, Vector3{0.6f, 5.0f, 0.6f});
-            auto hit = std::make_unique<BoxColliderComponent>(pipe.get(), physics, Vector3::One, true);
-            hit->SetCollisionCallBack(onHit);
-            pipe->AddComponent(std::move(hit));
-            pipe->SetParent(this);
-            mParts[side > 0] = actors.AddActor(std::move(pipe));
+            const Vector3 pos{0.0f, side * (kGap / 2 + 5.0f), 0.0f}, halfSize{0.6f, 5.0f, 0.6f};
+            Attach(actors, std::make_unique<Block>(model, pos, halfSize));
+            Attach(actors, std::make_unique<HitBox>(physics, pos, halfSize, onHit));
         }
     }
 
@@ -107,16 +113,20 @@ protected:
     }
 
 private:
+    void Attach(ActorsManager& actors, std::unique_ptr<Actor> part) {
+        part->SetParent(this);
+        mParts.push_back(actors.AddActor(std::move(part)));
+    }
+
     const World& mWorld;
     int mRound;
     bool mScored{false};
-    Actor* mParts[2]{};
+    std::vector<Actor*> mParts;
 };
 
 class FlappyBird : public UserApplication {
 public:
     bool Init(EngineContext& ctx) override {
-        ctx.operations.loaderContext.SubmitLoadingInstruction(std::make_unique<FlappyRecipe>());
         ctx.subsystems.camerasContext.AddCamera(std::make_unique<SideCamera>(1024.0f, 768.0f));
         ctx.subsystems.camerasContext.SetCurrentCamera("Side");
         return true;
@@ -124,18 +134,18 @@ public:
 
     void OnResourcesReady(EngineContext& ctx) override {
         auto& assets = ctx.resources.assetsContext;
-        auto model = [&](const std::string& name) {
+        auto model = [&](const std::string& name, Uint8 r, Uint8 g, Uint8 b) {
             auto* m = assets.AddModel(name);
-            m->AddTexture(assets.GetTexture("Flappy/Assets/" + name));
+            m->AddTexture(SolidColor(assets, name, r, g, b));
             return m;
         };
         mActors = &ctx.subsystems.actorsContext;
         mPhysics = &ctx.subsystems.physicsContext;
-        mPipeModel = model("Pipe");
+        mPipeModel = model("Pipe", 80, 185, 60);
         ctx.operations.renderContext.SetLightPosition(Vector3{-6.0f, 20.0f, -15.0f}); // luz vindo da frente
 
-        mBird = static_cast<Bird*>(mActors->AddActor(std::make_unique<Bird>(model("Bird"), mPhysics)));
-        mActors->AddActor(std::make_unique<Block>(model("Ground"), Vector3{0.0f, -kWorldTop - 0.5f, 0.0f}, Vector3{12.0f, 0.5f, 1.0f}));
+        mBird = static_cast<Bird*>(mActors->AddActor(std::make_unique<Bird>(model("Bird", 255, 205, 40), mPhysics)));
+        mActors->AddActor(std::make_unique<Block>(model("Ground", 205, 165, 95), Vector3{0.0f, -kWorldTop - 0.5f, 0.0f}, Vector3{12.0f, 0.5f, 1.0f}));
 
         auto* font = assets.GetFont("Engine/Assets/Fonts/JetBrainsMono");
         mScore = AddText(ctx, font, 64, Vector2{490.0f, 30.0f});

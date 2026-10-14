@@ -42,8 +42,3 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
 # Flappy Bird: demo minima usando a Engine (um unico arquivo de jogo)
 add_executable(FlappyBird Flappy/FlappyBird.cpp)
 target_link_libraries(FlappyBird PRIVATE Engine SDL2::SDL2)
-add_custom_command(TARGET FlappyBird POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-        "${CMAKE_CURRENT_SOURCE_DIR}/Flappy/Assets"
-        "${CMAKE_CURRENT_BINARY_DIR}/Flappy/Assets"
-)
